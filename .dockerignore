@@ -1,0 +1,6 @@
+.git
+.env
+volumes
+bin
+coverage.out
+README.md
