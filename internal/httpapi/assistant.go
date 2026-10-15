@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"llm-api-demo/internal/llm"
+	"llm-api-demo/internal/usage"
 )
 
 const assistantRAGTopK = 3
@@ -62,6 +63,7 @@ func (h *Handler) assistantStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flusher.Flush()
+	ctx = usage.WithRoute(ctx, "assistant."+route.Path)
 
 	// 根据路由路径选择不同的处理逻辑。
 	switch route.Path {

@@ -16,6 +16,7 @@ import (
 	"llm-api-demo/internal/ingest"
 	"llm-api-demo/internal/llm"
 	"llm-api-demo/internal/rag"
+	"llm-api-demo/internal/usage"
 	"llm-api-demo/internal/workflow"
 )
 
@@ -114,7 +115,7 @@ func NewPlatformHandler(generator llm.Generator, conversations ConversationStore
 		mux.HandleFunc("POST /v1/knowledge/jobs", h.submitKnowledgeJob)
 		mux.HandleFunc("GET /v1/knowledge/jobs/{jobID}", h.getKnowledgeJob)
 	}
-	return mux
+	return requestMetadataMiddleware(mux)
 }
 
 // createConversation 路由，创建一个新的会话并返回会话 ID。
@@ -150,6 +151,7 @@ func (h *Handler) conversationMessage(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), h.timeout)
 	defer cancel()
+	ctx = usage.WithMetadata(ctx, usage.Metadata{ConversationID: conversationID, Route: "conversation"})
 
 	// Redis 锁让多个 API 实例也能串行更新同一会话，避免上下文链分叉。
 	unlock, err := h.conversations.Lock(ctx, conversationID, h.timeout+5*time.Second)

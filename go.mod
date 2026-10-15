@@ -3,11 +3,14 @@ module llm-api-demo
 go 1.27.2
 
 require (
+	github.com/google/uuid v1.6.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/milvus-io/milvus/client/v3 v3.0.0
 	github.com/openai/openai-go/v3 v3.75.0
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/tmc/langchaingo v0.1.15
 	github.com/twmb/franz-go v1.22.2
+	github.com/twmb/franz-go/pkg/kmsg v1.15.0
 )
 
 require (
@@ -21,8 +24,10 @@ require (
 	github.com/dlclark/regexp2 v1.10.0 // indirect
 	github.com/getsentry/sentry-go v0.30.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/klauspost/compress v1.20.3 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
@@ -37,7 +42,6 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
-	github.com/twmb/franz-go/pkg/kmsg v1.15.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	gitlab.com/golang-commonmark/html v0.0.0-20191124015941-a22733972181 // indirect
 	gitlab.com/golang-commonmark/linkify v0.0.0-20191026162114-a0c2df6c8f82 // indirect

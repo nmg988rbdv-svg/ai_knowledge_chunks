@@ -52,8 +52,10 @@ func (c *OpenAIClient) GenerateGrounded(ctx context.Context, question string, so
 		Store: openai.Bool(false),
 	})
 	if err != nil {
+		c.publishFailedUsage(ctx, "responses", c.model, 1, startedAt, err)
 		return Result{}, err
 	}
+	c.publishResponseUsage(ctx, *response, 1, startedAt)
 	// 检查模型返回的回答是否为空。
 	if strings.TrimSpace(response.OutputText()) == "" {
 		return Result{}, &ProviderError{Code: "empty_grounded_response", Message: "model returned an empty grounded answer"}
