@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/openai/openai-go/v3"
@@ -12,6 +13,8 @@ import (
 	"github.com/openai/openai-go/v3/packages/ssestream"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
+
+	usageevent "llm-api-demo/internal/usage"
 )
 
 const systemPrompt = "You are a concise and helpful assistant. Reply in the same language as the user."
@@ -44,9 +47,12 @@ var textAnalysisSchema = map[string]any{
 
 // Usage 汇总一次模型调用的 token 用量。
 type Usage struct {
-	InputTokens  int64 `json:"input_tokens"`  // 输入上下文消耗的 token 数。
-	OutputTokens int64 `json:"output_tokens"` // 模型生成内容消耗的 token 数。
-	TotalTokens  int64 `json:"total_tokens"`  // 本次调用的总 token 数。
+	InputTokens       int64 `json:"input_tokens"`        // 输入上下文消耗的 token 数。
+	CachedInputTokens int64 `json:"cached_input_tokens"` // 从 Prompt Cache 读取的输入 token 数。
+	CacheWriteTokens  int64 `json:"cache_write_tokens"`  // 写入 Prompt Cache 的输入 token 数。
+	OutputTokens      int64 `json:"output_tokens"`       // 模型生成内容消耗的 token 数。
+	ReasoningTokens   int64 `json:"reasoning_tokens"`    // 输出中用于推理的 token 数。
+	TotalTokens       int64 `json:"total_tokens"`        // 本次调用的总 token 数。
 }
 
 // Result 是对外返回的模型响应数据。
@@ -107,17 +113,35 @@ type Generator interface {
 
 // OpenAIClient 将项目的生成接口适配到 OpenAI Responses API。
 type OpenAIClient struct {
-	client openai.Client
-	model  string
+	client         openai.Client
+	model          string
+	usagePublisher usageevent.Publisher
+	logger         *slog.Logger
+}
+
+type ClientOption func(*OpenAIClient)
+
+// WithUsagePublisher 让每次真实 Responses API 调用都产生独立的用量事件。
+func WithUsagePublisher(publisher usageevent.Publisher, logger *slog.Logger) ClientOption {
+	return func(client *OpenAIClient) {
+		client.usagePublisher = publisher
+		if logger != nil {
+			client.logger = logger
+		}
+	}
 }
 
 // NewOpenAIClient 创建带有限次自动重试的 Responses API 客户端。
-func NewOpenAIClient(apiKey, model string) *OpenAIClient {
+func NewOpenAIClient(apiKey, model string, options ...ClientOption) *OpenAIClient {
 	client := openai.NewClient(
 		option.WithAPIKey(apiKey),
 		option.WithMaxRetries(2),
 	)
-	return &OpenAIClient{client: client, model: model}
+	result := &OpenAIClient{client: client, model: model, logger: slog.Default()}
+	for _, option := range options {
+		option(result)
+	}
+	return result
 }
 
 // Generate 调用模型生成响应，等待完整结果返回。
@@ -134,8 +158,10 @@ func (c *OpenAIClient) Generate(ctx context.Context, message string) (Result, er
 		Store: openai.Bool(false), // 不在供应商侧保存响应，避免本服务请求内容被持久化。
 	})
 	if err != nil {
+		c.publishFailedUsage(ctx, "responses", c.model, 1, startedAt, err)
 		return Result{}, err
 	}
+	c.publishResponseUsage(ctx, *response, 1, startedAt)
 
 	// 将 OpenAI Responses API 的响应转换为统一的 Result 结构，并计算请求耗时。
 	return resultFromResponse(*response, startedAt), nil
@@ -164,8 +190,10 @@ func (c *OpenAIClient) GenerateInConversation(ctx context.Context, message, prev
 	// 发送请求给 OpenAI Responses API，获取模型生成的响应。
 	response, err := c.client.Responses.New(ctx, params)
 	if err != nil {
+		c.publishFailedUsage(ctx, "responses", c.model, 1, startedAt, err)
 		return Result{}, err
 	}
+	c.publishResponseUsage(ctx, *response, 1, startedAt)
 	// 将响应转换为统一的 Result 结构，并计算请求耗时。
 	return resultFromResponse(*response, startedAt), nil
 }
@@ -195,8 +223,10 @@ func (c *OpenAIClient) Analyze(ctx context.Context, text string) (AnalysisResult
 		Store: openai.Bool(false),
 	})
 	if err != nil {
+		c.publishFailedUsage(ctx, "responses", c.model, 1, startedAt, err)
 		return AnalysisResult{}, err
 	}
+	c.publishResponseUsage(ctx, *response, 1, startedAt)
 
 	// 解析模型返回的文本输出，确保其符合预期的结构化格式。
 	analysis, err := parseAnalysis(response.OutputText())
@@ -213,9 +243,12 @@ func (c *OpenAIClient) Analyze(ctx context.Context, text string) (AnalysisResult
 		Model:    string(response.Model),
 		Analysis: analysis,
 		Usage: Usage{
-			InputTokens:  response.Usage.InputTokens,
-			OutputTokens: response.Usage.OutputTokens,
-			TotalTokens:  response.Usage.TotalTokens,
+			InputTokens:       response.Usage.InputTokens,
+			CachedInputTokens: response.Usage.InputTokensDetails.CachedTokens,
+			CacheWriteTokens:  response.Usage.InputTokensDetails.CacheWriteTokens,
+			OutputTokens:      response.Usage.OutputTokens,
+			ReasoningTokens:   response.Usage.OutputTokensDetails.ReasoningTokens,
+			TotalTokens:       response.Usage.TotalTokens,
 		},
 		DurationMS: time.Since(startedAt).Milliseconds(),
 	}, nil
@@ -262,8 +295,13 @@ func (c *OpenAIClient) Stream(ctx context.Context, message string, onDelta func(
 }
 
 // streamResponse 执行统一的 Responses API 流读取逻辑。
-func (c *OpenAIClient) streamResponse(ctx context.Context, params responses.ResponseNewParams, onDelta func(string) error) (Result, error) {
+func (c *OpenAIClient) streamResponse(ctx context.Context, params responses.ResponseNewParams, onDelta func(string) error) (result Result, resultErr error) {
 	startedAt := time.Now()
+	defer func() {
+		if resultErr != nil {
+			c.publishFailedUsage(ctx, "responses", c.model, 1, startedAt, resultErr)
+		}
+	}()
 	stream := c.client.Responses.NewStreaming(ctx, params)
 	defer stream.Close()
 
@@ -311,6 +349,7 @@ func (c *OpenAIClient) streamResponse(ctx context.Context, params responses.Resp
 	}
 
 	// 将最终响应转换为统一的 Result 结构，并计算请求耗时。
+	c.publishResponseUsage(ctx, finalResponse, 1, startedAt)
 	return resultFromResponse(finalResponse, startedAt), nil
 }
 
@@ -350,9 +389,12 @@ func resultFromResponse(response responses.Response, startedAt time.Time) Result
 		Model: string(response.Model),
 		Text:  response.OutputText(),
 		Usage: Usage{
-			InputTokens:  response.Usage.InputTokens,
-			OutputTokens: response.Usage.OutputTokens,
-			TotalTokens:  response.Usage.TotalTokens,
+			InputTokens:       response.Usage.InputTokens,
+			CachedInputTokens: response.Usage.InputTokensDetails.CachedTokens,
+			CacheWriteTokens:  response.Usage.InputTokensDetails.CacheWriteTokens,
+			OutputTokens:      response.Usage.OutputTokens,
+			ReasoningTokens:   response.Usage.OutputTokensDetails.ReasoningTokens,
+			TotalTokens:       response.Usage.TotalTokens,
 		},
 		DurationMS: time.Since(startedAt).Milliseconds(),
 	}

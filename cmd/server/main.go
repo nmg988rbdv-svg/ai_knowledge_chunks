@@ -14,6 +14,7 @@ import (
 	"llm-api-demo/internal/ingest"
 	"llm-api-demo/internal/llm"
 	"llm-api-demo/internal/rag"
+	"llm-api-demo/internal/usage"
 )
 
 // main 加载配置并启动 HTTP 服务。
@@ -28,11 +29,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 创建 LLM 客户端
-	llmClient := llm.NewOpenAIClient(cfg.APIKey, cfg.Model)
+	// 创建模型用量事件发布者。业务请求只负责投递 Kafka，数据库写入由 usage-worker 完成。
+	usagePublisher, err := usage.NewKafkaPublisher(cfg.KafkaBrokers, cfg.UsageKafkaTopic)
+	if err != nil {
+		logger.Error("initialize usage publisher", "error", err)
+		os.Exit(1)
+	}
+	defer usagePublisher.Close()
+
+	// 创建 LLM 客户端，并记录每次真实的 Responses API 调用。
+	llmClient := llm.NewOpenAIClient(cfg.APIKey, cfg.Model, llm.WithUsagePublisher(usagePublisher, logger))
 
 	// 创建向量嵌入器，用于将文本转换为向量表示。
-	embedder := rag.NewOpenAIEmbedder(cfg.APIKey, cfg.EmbeddingModel)
+	embedder := rag.NewOpenAIEmbedder(cfg.APIKey, cfg.EmbeddingModel, rag.WithUsagePublisher(usagePublisher, logger))
 
 	// 构建平台依赖，包括知识库服务和任务队列。
 	knowledge, jobs, conversations, closeResources, err := buildPlatform(cfg, embedder)

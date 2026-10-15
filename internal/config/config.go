@@ -26,6 +26,7 @@ type Config struct {
 	KafkaBrokers     []string      // Kafka broker 列表，逗号分隔
 	KafkaTopic       string        // Kafka 主题
 	KafkaGroup       string        // Kafka 消费组
+	UsageKafkaTopic  string        // 模型用量事件主题
 	ChunkSize        int           // RAG 文档切分块大小
 	ChunkOverlap     int           // RAG 文档切分重叠大小
 	JobTTL           time.Duration // 异步入库任务的 TTL
@@ -81,6 +82,7 @@ func Load() (Config, error) {
 		KafkaBrokers:     splitNonEmpty(envOrDefault("KAFKA_BROKERS", "127.0.0.1:9092")),
 		KafkaTopic:       envOrDefault("KAFKA_TOPIC", "knowledge.ingest.v1"),
 		KafkaGroup:       envOrDefault("KAFKA_GROUP", "ai-knowledge-workers"),
+		UsageKafkaTopic:  envOrDefault("USAGE_KAFKA_TOPIC", "llm.usage.v1"),
 		ChunkSize:        chunkSize,
 		ChunkOverlap:     chunkOverlap,
 		JobTTL:           jobTTL,
@@ -97,10 +99,32 @@ func Load() (Config, error) {
 	if cfg.MilvusDimension <= 0 || cfg.ChunkSize <= 0 || cfg.ChunkOverlap < 0 || cfg.ChunkOverlap >= cfg.ChunkSize {
 		return Config{}, errors.New("Milvus dimension and RAG chunk settings are invalid")
 	}
-	if cfg.JobTTL <= 0 || cfg.ConversationTTL <= 0 || len(cfg.KafkaBrokers) == 0 {
-		return Config{}, errors.New("JOB_TTL, CONVERSATION_TTL, and KAFKA_BROKERS must be configured")
+	if cfg.JobTTL <= 0 || cfg.ConversationTTL <= 0 || len(cfg.KafkaBrokers) == 0 || cfg.UsageKafkaTopic == "" {
+		return Config{}, errors.New("JOB_TTL, CONVERSATION_TTL, KAFKA_BROKERS, and USAGE_KAFKA_TOPIC must be configured")
 	}
 
+	return cfg, nil
+}
+
+// UsageWorkerConfig 只包含用量消费者需要的最小权限配置，不需要 OpenAI API Key。
+type UsageWorkerConfig struct {
+	PostgresDSN  string
+	KafkaBrokers []string
+	KafkaTopic   string
+	KafkaGroup   string
+}
+
+// LoadUsageWorker 加载独立用量消费者配置。
+func LoadUsageWorker() (UsageWorkerConfig, error) {
+	cfg := UsageWorkerConfig{
+		PostgresDSN:  envOrDefault("POSTGRES_DSN", "postgres://ai_platform:ai-platform-local@127.0.0.1:15432/ai_platform?sslmode=disable"),
+		KafkaBrokers: splitNonEmpty(envOrDefault("KAFKA_BROKERS", "127.0.0.1:9092")),
+		KafkaTopic:   envOrDefault("USAGE_KAFKA_TOPIC", "llm.usage.v1"),
+		KafkaGroup:   envOrDefault("USAGE_KAFKA_GROUP", "ai-usage-workers"),
+	}
+	if cfg.PostgresDSN == "" || len(cfg.KafkaBrokers) == 0 || cfg.KafkaTopic == "" || cfg.KafkaGroup == "" {
+		return UsageWorkerConfig{}, errors.New("POSTGRES_DSN, KAFKA_BROKERS, USAGE_KAFKA_TOPIC, and USAGE_KAFKA_GROUP must be configured")
+	}
 	return cfg, nil
 }
 

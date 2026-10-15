@@ -11,6 +11,7 @@ import (
 	"llm-api-demo/internal/config"
 	"llm-api-demo/internal/ingest"
 	"llm-api-demo/internal/rag"
+	"llm-api-demo/internal/usage"
 )
 
 func main() {
@@ -45,8 +46,17 @@ func main() {
 	}
 	defer store.Close(context.Background())
 
+	// 文档向量化的 token 用量也通过 Kafka 进入统一用量流水。
+	usagePublisher, err := usage.NewKafkaPublisher(cfg.KafkaBrokers, cfg.UsageKafkaTopic)
+	if err != nil {
+		logger.Error("initialize usage publisher", "error", err)
+		os.Exit(1)
+	}
+	defer usagePublisher.Close()
+
 	// 创建知识服务实例，使用 OpenAI 向量嵌入器和 Milvus 存储。
-	knowledge, err := rag.NewServiceWithStore(rag.NewOpenAIEmbedder(cfg.APIKey, cfg.EmbeddingModel), store, splitter)
+	embedder := rag.NewOpenAIEmbedder(cfg.APIKey, cfg.EmbeddingModel, rag.WithUsagePublisher(usagePublisher, logger))
+	knowledge, err := rag.NewServiceWithStore(embedder, store, splitter)
 	if err != nil {
 		logger.Error("initialize knowledge service", "error", err)
 		os.Exit(1)
@@ -84,6 +94,11 @@ func main() {
 
 	// 运行 Kafka 消费者，处理文档任务。
 	if err := consumer.Run(ctx, func(ctx context.Context, job ingest.DocumentJob) error {
+		ctx = usage.WithMetadata(ctx, usage.Metadata{
+			TraceID:   job.ID,
+			RequestID: job.ID,
+			Route:     "document.index",
+		})
 		// 处理文档任务前的日志记录。
 		logger.Info("processing ingestion job", "job_id", job.ID, "document_id", job.DocumentID)
 		// 正式处理文档任务，将文档分片并入库。

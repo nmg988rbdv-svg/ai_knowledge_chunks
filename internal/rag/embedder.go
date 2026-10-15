@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+
+	usageevent "llm-api-demo/internal/usage"
 )
 
 // Embedder 将一批文本转换为相同维度的向量，便于替换供应商及 Mock 测试。
@@ -16,17 +20,34 @@ type Embedder interface {
 
 // OpenAIEmbedder 使用 OpenAI Embeddings API 生成向量。
 type OpenAIEmbedder struct {
-	client openai.Client
-	model  string
+	client         openai.Client
+	model          string
+	usagePublisher usageevent.Publisher
+	logger         *slog.Logger
+}
+
+type EmbedderOption func(*OpenAIEmbedder)
+
+func WithUsagePublisher(publisher usageevent.Publisher, logger *slog.Logger) EmbedderOption {
+	return func(embedder *OpenAIEmbedder) {
+		embedder.usagePublisher = publisher
+		if logger != nil {
+			embedder.logger = logger
+		}
+	}
 }
 
 // NewOpenAIEmbedder 创建一个 OpenAIEmbedder 实例，使用指定的 API Key 和模型名称。
-func NewOpenAIEmbedder(apiKey, model string) *OpenAIEmbedder {
+func NewOpenAIEmbedder(apiKey, model string, options ...EmbedderOption) *OpenAIEmbedder {
 	client := openai.NewClient(
 		option.WithAPIKey(apiKey),
 		option.WithMaxRetries(2), // 设置最大重试次数为 2
 	)
-	return &OpenAIEmbedder{client: client, model: model}
+	result := &OpenAIEmbedder{client: client, model: model, logger: slog.Default()}
+	for _, option := range options {
+		option(result)
+	}
+	return result
 }
 
 // Embed 将一批文本转换为向量。
@@ -43,6 +64,7 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float64
 	}
 
 	// 调用 OpenAI Embeddings API 生成向量。
+	startedAt := time.Now()
 	response, err := e.client.Embeddings.New(ctx, openai.EmbeddingNewParams{
 		Input: openai.EmbeddingNewParamsInputUnion{
 			OfArrayOfStrings: texts, // 输入文本列表
@@ -50,8 +72,10 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float64
 		Model: openai.EmbeddingModel(e.model), // 使用指定的嵌入模型
 	})
 	if err != nil {
+		e.publishUsage(ctx, e.failedUsageEvent(ctx, startedAt, err, len(texts)))
 		return nil, err
 	}
+	e.publishUsage(ctx, e.completedUsageEvent(ctx, response.Model, response.Usage.PromptTokens, response.Usage.TotalTokens, startedAt, len(texts)))
 	// 验证返回的向量数量是否与输入文本数量一致。
 	if len(response.Data) != len(texts) {
 		return nil, fmt.Errorf("embedding count = %d, want %d", len(response.Data), len(texts))
@@ -73,4 +97,48 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float64
 		}
 	}
 	return vectors, nil
+}
+
+func (e *OpenAIEmbedder) completedUsageEvent(ctx context.Context, model string, inputTokens, totalTokens int64, startedAt time.Time, inputCount int) usageevent.Event {
+	event := usageevent.NewEvent(usageevent.MetadataFromContext(ctx))
+	event.Provider = "openai"
+	event.Model = model
+	event.Operation = "embeddings"
+	event.InputTokens = inputTokens
+	event.TotalTokens = totalTokens
+	event.DurationMS = time.Since(startedAt).Milliseconds()
+	event.Metadata = map[string]any{"input_count": inputCount}
+	return event
+}
+
+func (e *OpenAIEmbedder) failedUsageEvent(ctx context.Context, startedAt time.Time, callErr error, inputCount int) usageevent.Event {
+	event := usageevent.NewEvent(usageevent.MetadataFromContext(ctx))
+	event.Provider = "openai"
+	event.Model = e.model
+	event.Operation = "embeddings"
+	event.DurationMS = time.Since(startedAt).Milliseconds()
+	event.Status = usageevent.StatusFailed
+	event.ErrorCode = "upstream_error"
+	if errors.Is(callErr, context.DeadlineExceeded) {
+		event.ErrorCode = "deadline_exceeded"
+	} else if errors.Is(callErr, context.Canceled) {
+		event.ErrorCode = "canceled"
+	}
+	event.Metadata = map[string]any{"input_count": inputCount}
+	return event
+}
+
+func (e *OpenAIEmbedder) publishUsage(ctx context.Context, event usageevent.Event) {
+	if e.usagePublisher == nil {
+		return
+	}
+	publishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := e.usagePublisher.Publish(publishCtx, event); err != nil {
+		logger := e.logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Error("publish embedding usage event", "event_id", event.ID, "trace_id", event.TraceID, "error", err)
+	}
 }

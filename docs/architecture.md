@@ -4,12 +4,13 @@
 
 ### Go API
 
-API 只负责协议、校验、用例编排和错误映射。生产二进制只装配 Milvus、Redis 和 Kafka；自动化测试使用仅存在于 `_test.go` 的替身，不会把测试存储或同步队列编译进生产程序。
+API 只负责协议、校验、用例编排和错误映射。生产进程装配 Milvus、Redis、Kafka 与 PostgreSQL；自动化测试使用仅存在于 `_test.go` 的替身，不会把测试存储或同步队列编译进生产程序。
 
 - `internal/httpapi`：REST/SSE、请求体限制、超时、公开错误码、内置 UI
 - `internal/llm`：OpenAI Responses API、Embedding、Function Calling、Agent 循环
 - `internal/rag`：文档切块、向量化、向量存储、Top-K 检索
 - `internal/ingest`：任务发布、状态机和 Worker 处理逻辑
+- `internal/usage`：调用追踪、Kafka 用量事件、PostgreSQL 持久化和幂等写入
 
 ### LangChainGo
 
@@ -47,7 +48,31 @@ API 使用 `document_id` 作为消息 key，使同一文档的任务稳定进入
 
 API 启动时会显式创建并等待 `knowledge.ingest.v1` 的 3 个分区 leader 就绪，不依赖 broker 的自动建 topic 配置。
 
+Responses API 和 Embedding API 完成后会向 `llm.usage.v1` 发布逐次调用事件。事件使用 `trace_id` 作为 Kafka key，使同一业务请求（包括 Agent 多轮调用）保持分区内顺序。
+
 本地 Compose 使用 KRaft 单节点，适合开发。生产环境应使用多 broker、鉴权/TLS、重试主题和 DLQ。
+
+### PostgreSQL 用量流水
+
+`usage-worker` 独立消费 `llm.usage.v1`，只在 `llm_usage_records` 写入成功后提交 offset。事件 UUID 是主键，`provider + response_id` 是第二道唯一约束，因此消费者重启或 Kafka 重投不会产生重复账单记录。
+
+记录同时包含 `request_id`、`trace_id`、`conversation_id`、route、operation 和 `call_index`。普通问答通常只有一条 Responses 事件；RAG 会包含查询 Embedding 与回答生成；Agent 的每轮模型决策分别保存，但共享同一个 trace。
+
+schema 由 `golang-migrate` 管理，查询写在 `internal/usage/db/query.sql`，通过 `sqlc` 生成类型安全的 pgx 代码。Redis、日志和 Prometheus 均不作为计费审计的最终数据源。
+
+```text
+Responses / Embeddings
+          |
+          | acks=all
+          v
+ Kafka llm.usage.v1
+          |
+          v
+    Usage Worker
+          |
+          v
+ PostgreSQL llm_usage_records
+```
 
 ## 入库时序
 
@@ -90,6 +115,7 @@ Client        API          Redis        Kafka        Worker      OpenAI       Mi
 - Agent 有工具调用步数上限，防止无限循环。
 - 普通请求限制为 64 KiB，文档任务限制为 900 KiB，避免无界内存占用并保持在 Kafka 默认消息限制内。
 - Kafka 使用 `acks=all`；消费者显式提交 offset。
+- 用量事件逐调用记录，PostgreSQL 通过唯一约束保证重投幂等。
 - `/healthz` 只检查进程；`/readyz` 检查 Milvus、Redis、Kafka。
 - 结构化 JSON 日志记录模型、Token、耗时、任务 ID，不记录 API Key。
 - HTTP 响应只返回稳定错误码，供应商细节留在服务端日志。
@@ -99,5 +125,5 @@ Client        API          Redis        Kafka        Worker      OpenAI       Mi
 1. 文档层：PDF/Word/HTML 解析、对象存储、内容去重和版本管理。
 2. 检索层：BM25 + 向量混合检索、metadata filter、reranker、相关性阈值。
 3. Agent 层：工具权限、人工确认、幂等键、补偿事务和审计。
-4. 可观测性：Prometheus、OpenTelemetry trace、Prompt/检索/工具调用轨迹。
+4. 可观测性：Prometheus、OpenTelemetry trace、版本化模型价格表与成本告警。
 5. 评测层：检索 Recall@K、MRR，回答忠实度/相关性，Agent 成功率与成本回归。

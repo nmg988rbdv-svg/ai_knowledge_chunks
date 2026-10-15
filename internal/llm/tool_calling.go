@@ -88,11 +88,19 @@ type responseCreator func(context.Context, responses.ResponseNewParams) (*respon
 // GenerateWithTools 运行受步数限制的 Agent 循环。
 // 它会不断调用模型，执行模型建议的工具操作，直到模型返回最终文本结果。
 func (c *OpenAIClient) GenerateWithTools(ctx context.Context, message string) (ToolResult, error) {
+	callIndex := 0
 	// 调用工具代理循环，处理模型的工具调用，直到得到最终文本结果。
 	return runToolAgent(ctx, c.model, message, func(ctx context.Context, params responses.ResponseNewParams) (*responses.Response, error) {
-
+		callIndex++
+		startedAt := time.Now()
 		// 调用 OpenAI Responses API 创建新的响应。
-		return c.client.Responses.New(ctx, params)
+		response, err := c.client.Responses.New(ctx, params)
+		if err != nil {
+			c.publishFailedUsage(ctx, "responses", c.model, callIndex, startedAt, err)
+			return nil, err
+		}
+		c.publishResponseUsage(ctx, *response, callIndex, startedAt)
+		return response, nil
 	})
 }
 
@@ -286,17 +294,23 @@ func toolResultFromResponse(response responses.Response, traces []ToolCallTrace,
 // usageFromResponse 将 SDK 用量结构转换为项目对外使用的类型。
 func usageFromResponse(response responses.Response) Usage {
 	return Usage{
-		InputTokens:  response.Usage.InputTokens,
-		OutputTokens: response.Usage.OutputTokens,
-		TotalTokens:  response.Usage.TotalTokens,
+		InputTokens:       response.Usage.InputTokens,
+		CachedInputTokens: response.Usage.InputTokensDetails.CachedTokens,
+		CacheWriteTokens:  response.Usage.InputTokensDetails.CacheWriteTokens,
+		OutputTokens:      response.Usage.OutputTokens,
+		ReasoningTokens:   response.Usage.OutputTokensDetails.ReasoningTokens,
+		TotalTokens:       response.Usage.TotalTokens,
 	}
 }
 
 // addUsage 按 token 类型相加，汇总工具调用前后的多轮模型请求成本。
 func addUsage(left, right Usage) Usage {
 	return Usage{
-		InputTokens:  left.InputTokens + right.InputTokens,
-		OutputTokens: left.OutputTokens + right.OutputTokens,
-		TotalTokens:  left.TotalTokens + right.TotalTokens,
+		InputTokens:       left.InputTokens + right.InputTokens,
+		CachedInputTokens: left.CachedInputTokens + right.CachedInputTokens,
+		CacheWriteTokens:  left.CacheWriteTokens + right.CacheWriteTokens,
+		OutputTokens:      left.OutputTokens + right.OutputTokens,
+		ReasoningTokens:   left.ReasoningTokens + right.ReasoningTokens,
+		TotalTokens:       left.TotalTokens + right.TotalTokens,
 	}
 }
