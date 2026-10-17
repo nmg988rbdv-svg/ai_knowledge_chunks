@@ -12,6 +12,46 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getUsageSummary = `-- name: GetUsageSummary :one
+SELECT
+    count(*)::bigint AS total_calls,
+    count(*) FILTER (WHERE status = 'completed')::bigint AS completed_calls,
+    count(*) FILTER (WHERE status = 'failed')::bigint AS failed_calls,
+    coalesce(sum(input_tokens), 0)::bigint AS input_tokens,
+    coalesce(sum(cached_input_tokens), 0)::bigint AS cached_input_tokens,
+    coalesce(sum(output_tokens), 0)::bigint AS output_tokens,
+    coalesce(sum(reasoning_tokens), 0)::bigint AS reasoning_tokens,
+    coalesce(sum(total_tokens), 0)::bigint AS total_tokens
+FROM llm_usage_records
+`
+
+type GetUsageSummaryRow struct {
+	TotalCalls        int64 `json:"total_calls"`
+	CompletedCalls    int64 `json:"completed_calls"`
+	FailedCalls       int64 `json:"failed_calls"`
+	InputTokens       int64 `json:"input_tokens"`
+	CachedInputTokens int64 `json:"cached_input_tokens"`
+	OutputTokens      int64 `json:"output_tokens"`
+	ReasoningTokens   int64 `json:"reasoning_tokens"`
+	TotalTokens       int64 `json:"total_tokens"`
+}
+
+func (q *Queries) GetUsageSummary(ctx context.Context) (GetUsageSummaryRow, error) {
+	row := q.db.QueryRow(ctx, getUsageSummary)
+	var i GetUsageSummaryRow
+	err := row.Scan(
+		&i.TotalCalls,
+		&i.CompletedCalls,
+		&i.FailedCalls,
+		&i.InputTokens,
+		&i.CachedInputTokens,
+		&i.OutputTokens,
+		&i.ReasoningTokens,
+		&i.TotalTokens,
+	)
+	return i, err
+}
+
 const insertUsageRecord = `-- name: InsertUsageRecord :execrows
 INSERT INTO llm_usage_records (
     id,
@@ -97,4 +137,80 @@ func (q *Queries) InsertUsageRecord(ctx context.Context, arg InsertUsageRecordPa
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const listRecentUsageRecords = `-- name: ListRecentUsageRecords :many
+SELECT
+    id,
+    trace_id,
+    model,
+    route,
+    operation,
+    call_index,
+    input_tokens,
+    cached_input_tokens,
+    output_tokens,
+    reasoning_tokens,
+    total_tokens,
+    duration_ms,
+    status,
+    error_code,
+    created_at
+FROM llm_usage_records
+ORDER BY created_at DESC
+LIMIT $1
+`
+
+type ListRecentUsageRecordsRow struct {
+	ID                uuid.UUID          `json:"id"`
+	TraceID           string             `json:"trace_id"`
+	Model             string             `json:"model"`
+	Route             string             `json:"route"`
+	Operation         string             `json:"operation"`
+	CallIndex         int32              `json:"call_index"`
+	InputTokens       int64              `json:"input_tokens"`
+	CachedInputTokens int64              `json:"cached_input_tokens"`
+	OutputTokens      int64              `json:"output_tokens"`
+	ReasoningTokens   int64              `json:"reasoning_tokens"`
+	TotalTokens       int64              `json:"total_tokens"`
+	DurationMs        int64              `json:"duration_ms"`
+	Status            string             `json:"status"`
+	ErrorCode         string             `json:"error_code"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) ListRecentUsageRecords(ctx context.Context, limit int32) ([]ListRecentUsageRecordsRow, error) {
+	rows, err := q.db.Query(ctx, listRecentUsageRecords, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRecentUsageRecordsRow
+	for rows.Next() {
+		var i ListRecentUsageRecordsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TraceID,
+			&i.Model,
+			&i.Route,
+			&i.Operation,
+			&i.CallIndex,
+			&i.InputTokens,
+			&i.CachedInputTokens,
+			&i.OutputTokens,
+			&i.ReasoningTokens,
+			&i.TotalTokens,
+			&i.DurationMs,
+			&i.Status,
+			&i.ErrorCode,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

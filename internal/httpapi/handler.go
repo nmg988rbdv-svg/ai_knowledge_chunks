@@ -33,8 +33,25 @@ type Handler struct {
 	knowledge     *rag.Service      // 文档切块、向量化与相似度检索服务。
 	workflow      *workflow.Router  // StateGraph 条件路由器。
 	jobs          *ingest.Queue     // Kafka 文档入库队列及 Redis 状态查询。
+	usageReader   UsageReader       // PostgreSQL 用量统计与最近调用查询。
 	timeout       time.Duration     // 每次模型请求的服务端超时上限。
 	logger        *slog.Logger      // 记录内部错误及模型调用元数据。
+}
+
+// UsageReader 隔离 HTTP 层与 PostgreSQL 实现，也便于接口测试使用替身。
+type UsageReader interface {
+	Snapshot(context.Context, int) (usage.Snapshot, error)
+	Ping(context.Context) error
+}
+
+// HandlerOption 为可选的平台依赖保留向后兼容的注入方式。
+type HandlerOption func(*Handler)
+
+// WithUsageReader 启用 Token 用量查询接口与就绪检查。
+func WithUsageReader(reader UsageReader) HandlerOption {
+	return func(handler *Handler) {
+		handler.usageReader = reader
+	}
 }
 
 // chatRequest 是普通对话和流式对话共用的 JSON 请求格式。
@@ -71,7 +88,7 @@ type errorBody struct {
 }
 
 // NewPlatformHandler 创建一个完整的 HTTP Handler，注册各类路由并注入平台依赖。
-func NewPlatformHandler(generator llm.Generator, conversations ConversationStore, knowledge *rag.Service, jobs *ingest.Queue, timeout time.Duration, logger *slog.Logger) http.Handler {
+func NewPlatformHandler(generator llm.Generator, conversations ConversationStore, knowledge *rag.Service, jobs *ingest.Queue, timeout time.Duration, logger *slog.Logger, options ...HandlerOption) http.Handler {
 
 	// 初始化 Handler 结构体，注入各类平台依赖。
 	h := &Handler{
@@ -82,6 +99,9 @@ func NewPlatformHandler(generator llm.Generator, conversations ConversationStore
 		jobs:          jobs,
 		timeout:       timeout,
 		logger:        logger,
+	}
+	for _, option := range options {
+		option(h)
 	}
 	// 创建 HTTP 路由器，并注册各类路由处理函数。
 	mux := http.NewServeMux()
@@ -114,6 +134,9 @@ func NewPlatformHandler(generator llm.Generator, conversations ConversationStore
 	if jobs != nil {
 		mux.HandleFunc("POST /v1/knowledge/jobs", h.submitKnowledgeJob)
 		mux.HandleFunc("GET /v1/knowledge/jobs/{jobID}", h.getKnowledgeJob)
+	}
+	if h.usageReader != nil {
+		mux.HandleFunc("GET /v1/usage", h.getUsage)
 	}
 	return requestMetadataMiddleware(mux)
 }
@@ -377,6 +400,14 @@ func (h *Handler) ready(w http.ResponseWriter, r *http.Request) {
 			ready = false
 		} else {
 			checks["job_queue"] = "ok"
+		}
+	}
+	if h.usageReader != nil {
+		if err := h.usageReader.Ping(ctx); err != nil {
+			checks["usage_store"] = "unavailable"
+			ready = false
+		} else {
+			checks["usage_store"] = "ok"
 		}
 	}
 	status := http.StatusOK

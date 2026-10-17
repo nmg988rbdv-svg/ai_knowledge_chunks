@@ -143,7 +143,8 @@ go run ./cmd/usage-worker
 |---|---|---|
 | GET | `/` | 内置 Web UI |
 | GET | `/healthz` | 进程存活检查 |
-| GET | `/readyz` | Milvus、Redis、Kafka 就绪检查 |
+| GET | `/readyz` | Milvus、Redis、Kafka、PostgreSQL 就绪检查 |
+| GET | `/v1/usage?limit=30` | Token 汇总与最近调用明细（最多 100 条） |
 | POST | `/v1/assistant/stream` | 自动路由 Chat/RAG/Agent 的统一 SSE 问答 |
 | POST | `/v1/chat` | 普通对话 |
 | POST | `/v1/chat/stream` | SSE 流式对话 |
@@ -222,6 +223,12 @@ curl -sS http://localhost:8080/v1/agent/run \
 ```bash
 make usage
 make usage-summary
+```
+
+内置 Web UI 会显示累计 Token、输入/输出 Token、调用次数及最近 30 条调用记录。也可以直接查询：
+
+```bash
+curl -sS 'http://localhost:8080/v1/usage?limit=30'
 ```
 
 表中保存输入、缓存、输出、推理及总 token、耗时、状态和错误码。`estimated_cost_usd` 与 `pricing_version` 暂时保留为空，避免把会变化的供应商价格硬编码进历史记录；后续应通过版本化价格表计算并保存价格快照。

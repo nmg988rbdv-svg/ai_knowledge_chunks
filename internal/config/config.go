@@ -27,6 +27,7 @@ type Config struct {
 	KafkaTopic       string        // Kafka 主题
 	KafkaGroup       string        // Kafka 消费组
 	UsageKafkaTopic  string        // 模型用量事件主题
+	PostgresDSN      string        // Token 用量查询使用的 PostgreSQL 连接串。
 	ChunkSize        int           // RAG 文档切分块大小
 	ChunkOverlap     int           // RAG 文档切分重叠大小
 	JobTTL           time.Duration // 异步入库任务的 TTL
@@ -83,6 +84,7 @@ func Load() (Config, error) {
 		KafkaTopic:       envOrDefault("KAFKA_TOPIC", "knowledge.ingest.v1"),
 		KafkaGroup:       envOrDefault("KAFKA_GROUP", "ai-knowledge-workers"),
 		UsageKafkaTopic:  envOrDefault("USAGE_KAFKA_TOPIC", "llm.usage.v1"),
+		PostgresDSN:      envOrDefault("POSTGRES_DSN", "postgres://ai_platform:ai-platform-local@127.0.0.1:15432/ai_platform?sslmode=disable"),
 		ChunkSize:        chunkSize,
 		ChunkOverlap:     chunkOverlap,
 		JobTTL:           jobTTL,
@@ -99,8 +101,8 @@ func Load() (Config, error) {
 	if cfg.MilvusDimension <= 0 || cfg.ChunkSize <= 0 || cfg.ChunkOverlap < 0 || cfg.ChunkOverlap >= cfg.ChunkSize {
 		return Config{}, errors.New("Milvus dimension and RAG chunk settings are invalid")
 	}
-	if cfg.JobTTL <= 0 || cfg.ConversationTTL <= 0 || len(cfg.KafkaBrokers) == 0 || cfg.UsageKafkaTopic == "" {
-		return Config{}, errors.New("JOB_TTL, CONVERSATION_TTL, KAFKA_BROKERS, and USAGE_KAFKA_TOPIC must be configured")
+	if cfg.JobTTL <= 0 || cfg.ConversationTTL <= 0 || len(cfg.KafkaBrokers) == 0 || cfg.UsageKafkaTopic == "" || cfg.PostgresDSN == "" {
+		return Config{}, errors.New("JOB_TTL, CONVERSATION_TTL, KAFKA_BROKERS, USAGE_KAFKA_TOPIC, and POSTGRES_DSN must be configured")
 	}
 
 	return cfg, nil

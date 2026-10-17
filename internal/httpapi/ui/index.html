@@ -33,7 +33,21 @@
     .meta,.muted { color:var(--muted); font-size:13px; }
     .meta { margin-top:9px; min-height:21px; }
     .error { color:var(--danger)!important; }
-    @media(max-width:820px){ main{grid-template-columns:1fr}header{align-items:start;flex-direction:column}.row{grid-template-columns:1fr}.row button{width:100%} }
+    .usage-section { grid-column:1/-1; }
+    .summary-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-bottom:16px; }
+    .metric { padding:14px; border:1px solid var(--line); border-radius:12px; background:#091523; }
+    .metric span { display:block; color:var(--muted); font-size:12px; }
+    .metric strong { display:block; margin-top:3px; font-size:clamp(20px,3vw,29px); line-height:1.25; overflow-wrap:anywhere; }
+    .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:12px; }
+    table { width:100%; min-width:860px; border-collapse:collapse; background:#08131f; }
+    th,td { padding:11px 12px; border-bottom:1px solid #1a2b3e; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-size:12px; font-weight:650; background:#0a1725; position:sticky; top:0; }
+    tbody tr:last-child td { border-bottom:0; }
+    .token-detail { color:var(--muted); font-size:12px; white-space:nowrap; }
+    .status { display:inline-block; padding:2px 8px; border-radius:999px; background:#15372f; color:var(--brand); font-size:12px; }
+    .status.failed { background:#3a1d27; color:var(--danger); }
+    .compact-button { width:auto; padding:8px 13px; }
+    @media(max-width:820px){ main{grid-template-columns:1fr}header{align-items:start;flex-direction:column}.row{grid-template-columns:1fr}.row button{width:100%}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))} }
   </style>
 </head>
 <body>
@@ -60,6 +74,21 @@
       </div>
       <div id="job" class="output">文档会异步切块、向量化并写入 Milvus。</div>
     </section>
+    <section class="usage-section">
+      <div class="section-head"><div><h2>Token 用量</h2><span id="usageUpdated" class="muted">正在加载…</span></div><button id="usageButton" class="compact-button" onclick="loadUsage()">刷新</button></div>
+      <div class="summary-grid">
+        <div class="metric"><span>累计 Token</span><strong id="totalTokens">—</strong></div>
+        <div class="metric"><span>输入 Token</span><strong id="inputTokens">—</strong></div>
+        <div class="metric"><span>输出 Token</span><strong id="outputTokens">—</strong></div>
+        <div class="metric"><span>调用次数</span><strong id="totalCalls">—</strong></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>时间</th><th>路径 / 类型</th><th>模型</th><th>Token</th><th>耗时</th><th>状态</th></tr></thead>
+          <tbody id="usageRows"><tr><td colspan="6" class="muted">正在读取用量记录…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
   </main>
   <script>
     async function api(path,options={}){
@@ -72,6 +101,44 @@
     const set=(id,text,error=false)=>{const el=element(id);el.textContent=text;el.classList.toggle('error',error)};
     const showDetail=(id,title,text)=>{const el=element(id);el.textContent=`${title}\n${text}`;el.classList.add('visible')};
     const hideDetail=id=>{const el=element(id);el.textContent='';el.classList.remove('visible')};
+    const number=value=>new Intl.NumberFormat('zh-CN').format(Number(value)||0);
+
+    function renderUsageRows(records){
+      const body=element('usageRows');body.replaceChildren();
+      if(!records.length){
+        const row=document.createElement('tr'),cell=document.createElement('td');
+        cell.colSpan=6;cell.className='muted';cell.textContent='暂时没有模型调用记录。';row.appendChild(cell);body.appendChild(row);return;
+      }
+      for(const record of records){
+        const row=document.createElement('tr');
+        const values=[
+          new Date(record.created_at).toLocaleString('zh-CN',{hour12:false}),
+          `${record.route||'—'}\n${record.operation}${record.call_index>1?` · 第 ${record.call_index} 次`:''}`,
+          record.model||'—',
+          '',
+          `${number(record.duration_ms)} ms`,
+          ''
+        ];
+        values.forEach((value,index)=>{const cell=document.createElement('td');cell.textContent=value;if(index===1)cell.style.whiteSpace='pre-line';row.appendChild(cell)});
+        const tokenCell=row.children[3];
+        const tokenTotal=document.createElement('strong');tokenTotal.textContent=number(record.total_tokens);tokenCell.appendChild(tokenTotal);
+        const tokenDetail=document.createElement('div');tokenDetail.className='token-detail';tokenDetail.textContent=`输入 ${number(record.input_tokens)} · 输出 ${number(record.output_tokens)} · 缓存 ${number(record.cached_input_tokens)}`;tokenCell.appendChild(tokenDetail);
+        const status=document.createElement('span');status.className=`status${record.status==='failed'?' failed':''}`;status.textContent=record.status==='completed'?'成功':`失败${record.error_code?` · ${record.error_code}`:''}`;row.children[5].appendChild(status);
+        body.appendChild(row);
+      }
+    }
+
+    async function loadUsage(){
+      const button=element('usageButton');button.disabled=true;
+      try{
+        const data=await api('/v1/usage?limit=30'),summary=data.summary||{};
+        set('totalTokens',number(summary.total_tokens));set('inputTokens',number(summary.input_tokens));set('outputTokens',number(summary.output_tokens));
+        set('totalCalls',`${number(summary.total_calls)} 次`);renderUsageRows(data.records||[]);
+        set('usageUpdated',`缓存输入 ${number(summary.cached_input_tokens)} · 成功 ${number(summary.completed_calls)} · 失败 ${number(summary.failed_calls)} · ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`);
+      }catch(error){set('usageUpdated',error.message,true)}finally{button.disabled=false}
+    }
+
+    function refreshUsageSoon(){setTimeout(loadUsage,800)}
 
     async function ask(){
       const message=element('question').value.trim();
@@ -114,6 +181,7 @@
             }else if(event==='done'){
               const usage=payload.usage||{};
               set('answerMeta',`${payload.model||'模型'} · ${payload.duration_ms||0} ms · ${usage.total_tokens||0} tokens`);
+              refreshUsageSoon();
             }else if(event==='error'){
               throw new Error(payload?.error?.message||'请求处理失败');
             }
@@ -137,12 +205,13 @@
         await new Promise(resolve=>setTimeout(resolve,1000));
         const data=await api(`/v1/knowledge/jobs/${id}`);
         set('job',`任务 ${data.id}\n状态：${data.state}${data.chunks?`\n切片：${data.chunks}`:''}${data.error?`\n错误：${data.error}`:''}`,data.state==='failed');
-        if(['completed','failed'].includes(data.state))return;
+        if(['completed','failed'].includes(data.state)){refreshUsageSoon();return}
       }
       throw new Error('任务仍在处理，请稍后再次查询');
     }
     element('question').addEventListener('keydown',event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();ask()}});
     api('/readyz').then(data=>set('health',data.ready?'所有依赖正常':'部分依赖不可用',!data.ready)).catch(()=>set('health','服务不可用',true));
+    loadUsage();
   </script>
 </body>
 </html>

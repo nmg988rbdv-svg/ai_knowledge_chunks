@@ -143,6 +143,7 @@ services:
       REDIS_ADDRESS: redis:6379
       KAFKA_BROKERS: kafka:19092
       USAGE_KAFKA_TOPIC: ${USAGE_KAFKA_TOPIC:-llm.usage.v1}
+      POSTGRES_DSN: postgres://${POSTGRES_USER:-ai_platform}:${POSTGRES_PASSWORD:-ai-platform-local}@postgres:5432/${POSTGRES_DB:-ai_platform}?sslmode=disable
     ports:
       - "8080:8080"
     depends_on:
@@ -152,6 +153,8 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/readyz"]
       interval: 10s
