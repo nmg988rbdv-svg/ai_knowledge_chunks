@@ -37,6 +37,16 @@ func main() {
 	}
 	defer usagePublisher.Close()
 
+	// API 只读查询 PostgreSQL，用于在管理界面展示累计 Token 与最近调用明细。
+	usageStoreCtx, cancelUsageStore := context.WithTimeout(context.Background(), 30*time.Second)
+	usageStore, err := usage.NewStore(usageStoreCtx, cfg.PostgresDSN)
+	cancelUsageStore()
+	if err != nil {
+		logger.Error("initialize usage PostgreSQL store", "error", err)
+		os.Exit(1)
+	}
+	defer usageStore.Close()
+
 	// 创建 LLM 客户端，并记录每次真实的 Responses API 调用。
 	llmClient := llm.NewOpenAIClient(cfg.APIKey, cfg.Model, llm.WithUsagePublisher(usagePublisher, logger))
 
@@ -52,7 +62,15 @@ func main() {
 	defer closeResources()
 
 	// 创建 HTTP Handler，将 LLM 客户端、知识库服务和任务队列注入其中。
-	handler := httpapi.NewPlatformHandler(llmClient, conversations, knowledge, jobs, cfg.LLMTimeout, logger)
+	handler := httpapi.NewPlatformHandler(
+		llmClient,
+		conversations,
+		knowledge,
+		jobs,
+		cfg.LLMTimeout,
+		logger,
+		httpapi.WithUsageReader(usageStore),
+	)
 
 	// 创建 HTTP 服务器，配置地址、处理器及各类超时。
 	server := &http.Server{

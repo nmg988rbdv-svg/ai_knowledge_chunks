@@ -56,6 +56,8 @@ Responses API 和 Embedding API 完成后会向 `llm.usage.v1` 发布逐次调�
 
 `usage-worker` 独立消费 `llm.usage.v1`，只在 `llm_usage_records` 写入成功后提交 offset。事件 UUID 是主键，`provider + response_id` 是第二道唯一约束，因此消费者重启或 Kafka 重投不会产生重复账单记录。
 
+API 进程通过只读 `GET /v1/usage` 查询累计统计和最近调用，供同源 Web UI 展示；该查询不经过 Kafka，也不会产生新的模型用量事件。PostgreSQL 同时加入 `/readyz` 就绪检查。
+
 记录同时包含 `request_id`、`trace_id`、`conversation_id`、route、operation 和 `call_index`。普通问答通常只有一条 Responses 事件；RAG 会包含查询 Embedding 与回答生成；Agent 的每轮模型决策分别保存，但共享同一个 trace。
 
 schema 由 `golang-migrate` 管理，查询写在 `internal/usage/db/query.sql`，通过 `sqlc` 生成类型安全的 pgx 代码。Redis、日志和 Prometheus 均不作为计费审计的最终数据源。
